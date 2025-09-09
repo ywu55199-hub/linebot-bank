@@ -1,0 +1,24 @@
+﻿# === Build / Cache ===
+target/
+*.log
+logs/
+*.tmp
+*.bak
+
+# === IDE / Editor ===
+.vscode/
+.idea/
+*.iml
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+
+# === Local data (過去 H2 可能產出的資料夾) ===
+data/
+
+# === Env / Secrets（若未來要用 .env 請忽略） ===
+*.env
+
+# === Maven Wrapper（保留 .mvn 以便用 mvnw；不忽略它） ===
+# 不要把 .mvn 列在忽略清單，這樣 wrapper 會一起被版控
