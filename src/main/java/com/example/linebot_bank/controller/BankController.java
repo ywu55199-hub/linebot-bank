@@ -23,6 +23,8 @@ public class BankController {
         this.bankService = bankService;
     }
 
+    // -------------------- 既有 API（保留相容） --------------------
+
     @PostMapping("/register")
     public ResponseEntity<?> register(@RequestBody RegisterRequest req) {
         var acc = bankService.register(req.getLineUserId(), req.getName());
@@ -64,6 +66,51 @@ public class BankController {
     public List<Transaction> transactions(@RequestParam String lineUserId) {
         return bankService.lastTransactions(lineUserId);
     }
+
+    // -------------------- 新增：RESTful CRUD（含軟刪） --------------------
+
+    /** C：建立或重新啟用帳戶 */
+    @PostMapping("/accounts")
+    public ResponseEntity<?> createAccount(@RequestBody RegisterRequest req) {
+        var acc = bankService.register(req.getLineUserId(), req.getName());
+        return ResponseEntity.ok(Map.of(
+                "lineUserId", acc.getLineUserId(),
+                "name", acc.getName(),
+                "balance", acc.getBalance()
+        ));
+    }
+
+    /** R：讀取帳戶（僅 active=true） */
+    @GetMapping("/accounts/{lineUserId}")
+    public ResponseEntity<?> getAccount(@PathVariable String lineUserId) {
+        var acc = bankService.getAccount(lineUserId);
+        return ResponseEntity.ok(Map.of(
+                "lineUserId", acc.getLineUserId(),
+                "name", acc.getName(),
+                "balance", acc.getBalance()
+        ));
+    }
+
+    /** U：更新帳戶名稱（僅 active=true） */
+    @PutMapping("/accounts/{lineUserId}")
+    public ResponseEntity<?> updateAccountName(@PathVariable String lineUserId,
+                                               @RequestBody Map<String, String> body) {
+        String newName = body.getOrDefault("name", "").trim();
+        var acc = bankService.rename(lineUserId, newName);
+        return ResponseEntity.ok(Map.of(
+                "lineUserId", acc.getLineUserId(),
+                "name", acc.getName()
+        ));
+    }
+
+    /** D：軟刪除（停用帳戶，active=false） */
+    @DeleteMapping("/accounts/{lineUserId}")
+    public ResponseEntity<Void> deactivate(@PathVariable String lineUserId) {
+        bankService.deactivateAccount(lineUserId);
+        return ResponseEntity.noContent().build();
+    }
+
+    // -------------------- 統一錯誤處理 --------------------
 
     // 把常見錯誤轉成 422，回 LINE/前端較友善
     @ExceptionHandler(IllegalArgumentException.class)

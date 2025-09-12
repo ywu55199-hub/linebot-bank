@@ -20,6 +20,8 @@ import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.List;
 import java.util.StringJoiner;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
 @RequestMapping("/line")
@@ -30,6 +32,9 @@ public class LineWebhookController {
     private final BankService bankService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RestTemplate restTemplate = new RestTemplate();
+
+    // ✅【新增】改名引導狀態：按「改名」後，下一句文字視為新名字
+    private final Map<String, Boolean> renamePending = new ConcurrentHashMap<>();
 
     @Value("${line.channelSecret}")
     private String channelSecret;
@@ -82,9 +87,61 @@ public class LineWebhookController {
                         String text = event.path("message").path("text").asText().trim();
                         String userId = event.path("source").path("userId").asText();
 
+                        // ✅【新增】改名引導：若在等待新名字，這次輸入直接當作新名字
+                        if (renamePending.getOrDefault(userId, false)) {
+                            if ("取消".equals(text)) {
+                                renamePending.put(userId, false);
+                                replyTextWithMenu(replyToken, "已取消改名。");
+                                continue;
+                            }
+                            if (text.isBlank()) {
+                                replyError(replyToken, "名字不能是空白，請再輸入一次。或輸入「取消」退出。");
+                                continue;
+                            }
+                            try {
+                                var acc = bankService.rename(userId, text);
+                                renamePending.put(userId, false);
+                                replyTextWithMenu(replyToken, "✅ 改名成功：" + acc.getName());
+                            } catch (Exception ex) {
+                                replyError(replyToken, "改名失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
+
                         if (isMenuKeyword(text)) { replyMenuQuick(replyToken); continue; }
                         if ("存款".equals(text)) { replyAmountQuick(replyToken, "deposit"); continue; }
                         if ("提款".equals(text)) { replyAmountQuick(replyToken, "withdraw"); continue; }
+
+                        // ✅【新增】「改名」→ 先提示輸入新名字（不用再打「改名 XXX」）
+                        if ("改名".equals(text)) {
+                            renamePending.put(userId, true);
+                            replyTextWithMenu(replyToken, "請輸入新名字（或輸入「取消」退出）：");
+                            continue;
+                        }
+
+                        // ✅【新增】餘額/明細 改為 Flex 回覆（更好看）
+                        if ("餘額".equals(text)) {
+                            try {
+                                BigDecimal bal = bankService.getBalance(userId);
+                                replyFlex(replyToken, "目前餘額", buildBalanceFlex(bal));
+                            } catch (Exception ex) {
+                                replyError(replyToken, "查詢餘額失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
+                        if ("明細".equals(text)) {
+                            try {
+                                List<Transaction> list = bankService.lastTransactions(userId);
+                                if (list.isEmpty()) {
+                                    replyTextWithMenu(replyToken, "尚無交易紀錄");
+                                } else {
+                                    replyFlex(replyToken, "最近交易", buildTransactionListFlex(list));
+                                }
+                            } catch (Exception ex) {
+                                replyError(replyToken, "查詢明細失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
 
                         // 直接處理「存 1000 / 提 500」→ 回 Flex
                         if (text.matches("^存\\s+\\d+(\\.\\d{1,2})?$")) {
@@ -95,7 +152,7 @@ public class LineWebhookController {
                                 String flex = buildTransactionFlex("存款", amt, newBal, "LINE 存款");
                                 replyFlex(replyToken, "存款成功", flex);
                             } catch (Exception ex) {
-                                replyTextWithMenu(replyToken, "存款失敗：" + ex.getMessage());
+                                replyError(replyToken, "存款失敗：" + ex.getMessage());
                             }
                             continue;
                         }
@@ -107,12 +164,12 @@ public class LineWebhookController {
                                 String flex = buildTransactionFlex("提款", amt, newBal, "LINE 提款");
                                 replyFlex(replyToken, "提款成功", flex);
                             } catch (Exception ex) {
-                                replyTextWithMenu(replyToken, "提款失敗：" + ex.getMessage());
+                                replyError(replyToken, "提款失敗：" + ex.getMessage());
                             }
                             continue;
                         }
 
-                        // 其他指令仍用原文字回覆＋快捷鍵
+                        // 其他指令仍用原文字回覆＋快捷鍵（保留你的既有行為）
                         String reply = handleCommand(userId, text);
                         if (reply == null || reply.isBlank()) {
                             replyMenuQuick(replyToken);
@@ -146,12 +203,14 @@ public class LineWebhookController {
                 var acc = bankService.register(userId, name);
                 return "註冊成功：" + acc.getName() + "\n目前餘額：" + acc.getBalance();
             }
+            // 保留你原本的「改名 XXX」寫法（與引導式並存）
             if (text.startsWith("改名")) {
                 String newName = text.replaceFirst("^改名\\s*", "").trim();
                 if (newName.isBlank()) return "請輸入新名字，例如：改名 Alan";
                 var acc = bankService.rename(userId, newName);
                 return "改名成功：" + acc.getName();
             }
+            // 注意：真正的「餘額 / 明細」現在在 webhook 內已用 Flex 處理，這裡保留原文字版以相容
             if (text.equals("餘額")) {
                 return "目前餘額：" + bankService.getBalance(userId);
             }
@@ -204,7 +263,8 @@ public class LineWebhookController {
             }
             replyTextWithMenu(replyToken, "無效的操作");
         } catch (Exception e) {
-            replyTextWithMenu(replyToken, "操作失敗：" + e.getMessage());
+            // ✅ 錯誤訊息更親切
+            replyError(replyToken, "操作失敗：" + e.getMessage());
         }
     }
 
@@ -229,7 +289,7 @@ public class LineWebhookController {
                       {"type":"action","action":{"type":"message","label":"明細","text":"明細"}},
                       {"type":"action","action":{"type":"message","label":"存款","text":"存款"}},
                       {"type":"action","action":{"type":"message","label":"提款","text":"提款"}},
-                      {"type":"action","action":{"type":"message","label":"改名","text":"改名 你的新名字"}}
+                      {"type":"action","action":{"type":"message","label":"改名","text":"改名"}}
                     ]
                   }
                 }
@@ -246,29 +306,30 @@ public class LineWebhookController {
         }
     }
 
-    /** 主選單（只有快捷鍵，無文字） */
+    /** 主選單（清楚顯示標題） */
     private void replyMenuQuick(String replyToken) {
         try {
             String url = "https://api.line.me/v2/bot/message/reply";
             String payload = """
             {
-              "replyToken":"%s",
-              "messages":[
+            "replyToken":"%s",
+            "messages":[
                 {
-                  "type":"text",
-                  "text":"%s",
-                  "quickReply":{
+                "type":"text",
+                "text":"請選擇功能：",
+                "quickReply":{
                     "items":[
-                      {"type":"action","action":{"type":"message","label":"查餘額","text":"餘額"}},
-                      {"type":"action","action":{"type":"message","label":"存款","text":"存款"}},
-                      {"type":"action","action":{"type":"message","label":"提款","text":"提款"}},
-                      {"type":"action","action":{"type":"message","label":"交易明細","text":"明細"}}
+                    {"type":"action","action":{"type":"message","label":"查餘額","text":"餘額"}},
+                    {"type":"action","action":{"type":"message","label":"存款","text":"存款"}},
+                    {"type":"action","action":{"type":"message","label":"提款","text":"提款"}},
+                    {"type":"action","action":{"type":"message","label":"交易明細","text":"明細"}},
+                    {"type":"action","action":{"type":"message","label":"改名","text":"改名"}}
                     ]
-                  }
                 }
-              ]
+                }
+            ]
             }
-            """.formatted(replyToken, ZWSP); // 零寬空白：視覺上無文字
+            """.formatted(replyToken);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setBearerAuth(channelAccessToken);
@@ -362,76 +423,132 @@ public class LineWebhookController {
         }
     }
 
-    /** 建立交易摘要 Flex JSON（Bubble） */
+    /** 建立交易摘要 Flex JSON（Bubble，美化版） */
     private String buildTransactionFlex(String type, BigDecimal amount, BigDecimal newBalance, String note) {
         String amt = amount.stripTrailingZeros().toPlainString();
         String bal = newBalance.stripTrailingZeros().toPlainString();
         String memo = (note == null || note.isBlank()) ? "-" : note;
 
+        // 根據交易類型切換顏色
+        String headerColor = "存款".equals(type) ? "#DFF6DD" : "#F9D6D5";
+
+        return """
+        {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "%s",
+            "contents": [
+            { "type": "text", "text": "交易成功（%s）", "weight": "bold", "size": "lg", "align":"center" }
+            ]
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": [
+            {
+                "type": "text",
+                "text": "$%s",
+                "weight": "bold",
+                "size": "xxl",
+                "color": "#333333",
+                "align": "center"
+            },
+            {
+                "type": "box",
+                "layout": "baseline",
+                "spacing": "sm",
+                "contents": [
+                {"type":"text","text":"💰 新餘額","size":"sm","color":"#888888","flex":2},
+                {"type":"text","text":"$%s","size":"sm","wrap":true,"flex":5}
+                ]
+            },
+            {
+                "type": "box",
+                "layout": "baseline",
+                "contents": [
+                {"type":"text","text":"備註","size":"sm","color":"#888888","flex":2},
+                {"type":"text","text":"%s","size":"sm","wrap":true,"flex":5}
+                ]
+            }
+            ]
+        },
+        "footer": {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "md",
+            "contents": [
+            { "type":"button", "style":"link", "action":{"type":"message","label":"餘額","text":"餘額"}, "height":"sm" },
+            { "type":"button", "style":"link", "action":{"type":"message","label":"明細","text":"明細"}, "height":"sm" },
+            { "type":"button", "style":"link", "action":{"type":"message","label":"選單","text":"選單"}, "height":"sm" }
+            ]
+        }
+        }
+        """.formatted(headerColor, type, amt, bal, memo);
+    }
+
+    /** ✅【新增】餘額 Flex */
+    private String buildBalanceFlex(BigDecimal balance) {
+        String bal = balance.stripTrailingZeros().toPlainString();
         return """
         {
           "type": "bubble",
-          "size": "mega",
-          "header": {
+          "body": {
             "type": "box",
             "layout": "vertical",
-            "backgroundColor": "#E7F8ED",
             "contents": [
-              { "type": "text", "text": "交易成功（%s）", "weight": "bold", "size": "lg" }
+              { "type": "text", "text": "💰 目前餘額", "weight": "bold", "size": "lg", "align":"center" },
+              { "type": "text", "text": "$%s", "size": "xxl", "align":"center", "color":"#2E7D32" }
             ]
-          },
+          }
+        }
+        """.formatted(bal);
+    }
+
+    /** ✅【新增】交易明細 Flex（最多 5 筆，避免 JSON 尾逗號） */
+    private String buildTransactionListFlex(List<Transaction> list) {
+        StringBuilder rows = new StringBuilder();
+        int i = 0;
+        for (Transaction tx : list.stream().limit(5).toList()) {
+            String type = tx.getType() == TransactionType.DEPOSIT ? "存" : "提";
+            String amt = tx.getAmount().stripTrailingZeros().toPlainString();
+            String time = String.valueOf(tx.getCreatedAt());
+            if (i++ > 0) rows.append(",");
+            try {
+                rows.append("""
+                {
+                  "type":"box",
+                  "layout":"horizontal",
+                  "spacing":"sm",
+                  "contents":[
+                    {"type":"text","text":%s,"size":"sm","flex":2},
+                    {"type":"text","text":%s,"size":"sm","align":"end","flex":3}
+                  ]
+                }
+                """.formatted(
+                        objectMapper.writeValueAsString(type + " $" + amt),
+                        objectMapper.writeValueAsString(time)
+                ));
+            } catch (Exception ignored) {}
+        }
+
+        return """
+        {
+          "type": "bubble",
           "body": {
             "type": "box",
             "layout": "vertical",
             "spacing": "sm",
             "contents": [
-              { "type": "separator", "margin": "md" },
-              {
-                "type": "box",
-                "layout": "vertical",
-                "margin": "md",
-                "spacing": "xs",
-                "contents": [
-                  {
-                    "type": "box",
-                    "layout": "baseline",
-                    "contents": [
-                      {"type":"text","text":"金額","size":"sm","color":"#888888","flex":2},
-                      {"type":"text","text":"$%s","size":"sm","wrap":true,"flex":5}
-                    ]
-                  },
-                  {
-                    "type": "box",
-                    "layout": "baseline",
-                    "contents": [
-                      {"type":"text","text":"新餘額","size":"sm","color":"#888888","flex":2},
-                      {"type":"text","text":"$%s","size":"sm","wrap":true,"flex":5}
-                    ]
-                  },
-                  {
-                    "type": "box",
-                    "layout": "baseline",
-                    "contents": [
-                      {"type":"text","text":"備註","size":"sm","color":"#888888","flex":2},
-                      {"type":"text","text":"%s","size":"sm","wrap":true,"flex":5}
-                    ]
-                  }
-                ]
-              }
-            ]
-          },
-          "footer": {
-            "type": "box",
-            "layout": "horizontal",
-            "spacing": "md",
-            "contents": [
-              { "type":"button", "action":{"type":"message","label":"餘額","text":"餘額"}, "height":"sm" },
-              { "type":"button", "action":{"type":"message","label":"明細","text":"明細"}, "height":"sm" },
-              { "type":"button", "action":{"type":"message","label":"選單","text":"選單"}, "height":"sm" }
+              { "type": "text", "text": "最近交易", "weight": "bold", "size": "lg" }
+              %s
             ]
           }
         }
-        """.formatted(type, amt, bal, memo);
+        """.formatted(rows.length() > 0 ? "," + rows : "");
     }
 
     /** 驗證 X-Line-Signature */
@@ -453,4 +570,10 @@ public class LineWebhookController {
         return "選單".equals(text) || "功能".equals(text)
                 || "menu".equalsIgnoreCase(text) || "開始".equals(text);
     }
+
+    /** ✅【新增】更親切的錯誤訊息統一回覆 */
+    private void replyError(String replyToken, String message) {
+        replyTextWithMenu(replyToken, "❌ " + message + "\n💡 您可以輸入「選單」查看功能");
+    }
 }
+    

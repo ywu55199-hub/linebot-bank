@@ -7,7 +7,6 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     username: linebot
     password: LinePass!
-
   jpa:
     hibernate:
       ddl-auto: update
@@ -16,3 +15,6 @@ spring:
 line:
   channelSecret: ${LINE_CHANNEL_SECRET}
   channelAccessToken: ${LINE_CHANNEL_ACCESS_TOKEN}
+
+cwa:
+  apiKey: CWA-F9DC2268-E30A-4087-A5BC-0B8AED4EFADD
