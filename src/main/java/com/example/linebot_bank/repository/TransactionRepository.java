@@ -9,15 +9,18 @@ import java.util.List;
 
 public interface TransactionRepository extends JpaRepository<Transaction, Long> {
 
-    /** 既有使用：取最近 20 筆交易（由新到舊） */
+    /** 取最近 20 筆交易 */
     List<Transaction> findTop20ByAccountOrderByCreatedAtDesc(Account account);
 
-    /** 可彈性調整回傳筆數：搭配 Pageable.ofSize(n) 使用（由新到舊） */
+    /** 可彈性調整回傳筆數 */
     List<Transaction> findByAccountOrderByCreatedAtDesc(Account account, Pageable pageable);
 
-    /** 取最新一筆交易（由新到舊的第一筆） */
+    /** 取最新一筆交易 */
     Transaction findFirstByAccountOrderByCreatedAtDesc(Account account);
 
     /** 某帳戶的交易總筆數 */
     long countByAccount(Account account);
+
+    /** 刪除某帳戶的所有交易紀錄 */
+    void deleteAllByAccount(Account account);
 }

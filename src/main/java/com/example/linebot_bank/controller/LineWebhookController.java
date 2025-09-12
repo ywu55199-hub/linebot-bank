@@ -3,6 +3,7 @@ package com.example.linebot_bank.controller;
 import com.example.linebot_bank.model.Transaction;
 import com.example.linebot_bank.model.TransactionType;
 import com.example.linebot_bank.service.BankService;
+import com.example.linebot_bank.service.WeatherService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -17,23 +18,21 @@ import javax.crypto.spec.SecretKeySpec;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Base64;
-import java.util.List;
-import java.util.StringJoiner;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
 @RequestMapping("/line")
 public class LineWebhookController {
 
-    private static final String ZWSP = "\u200B"; // 零寬空白：讓訊息看起來沒有文字
+    private static final String ZWSP = "\u200B"; // 零寬空白
 
     private final BankService bankService;
+    private final WeatherService weatherService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RestTemplate restTemplate = new RestTemplate();
 
-    // ✅【新增】改名引導狀態：按「改名」後，下一句文字視為新名字
+    // 改名引導狀態
     private final Map<String, Boolean> renamePending = new ConcurrentHashMap<>();
 
     @Value("${line.channelSecret}")
@@ -42,8 +41,9 @@ public class LineWebhookController {
     @Value("${line.channelAccessToken}")
     private String channelAccessToken;
 
-    public LineWebhookController(BankService bankService) {
+    public LineWebhookController(BankService bankService, WeatherService weatherService) {
         this.bankService = bankService;
+        this.weatherService = weatherService;
     }
 
     /** LINE Webhook 入口 */
@@ -52,7 +52,6 @@ public class LineWebhookController {
             @RequestHeader(name = "X-Line-Signature", required = false) String signature,
             @RequestBody String body) {
 
-        // 驗證簽章
         if (signature == null || !verifySignature(body, signature, channelSecret)) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Bad signature");
         }
@@ -62,24 +61,16 @@ public class LineWebhookController {
             JsonNode events = root.get("events");
             if (events != null && events.isArray()) {
                 for (JsonNode event : events) {
-
                     String type = event.path("type").asText();
 
-                    /** 個聊加好友（follow）就丟選單（只有快捷鍵） */
-                    if ("follow".equals(type)) {
+                    // 加好友 / 被邀進群組 → 主選單
+                    if ("follow".equals(type) || "join".equals(type)) {
                         String replyToken = event.path("replyToken").asText();
                         replyMenuQuick(replyToken);
                         continue;
                     }
 
-                    /** 被邀進群組/聊天室也丟選單（只有快捷鍵） */
-                    if ("join".equals(type)) {
-                        String replyToken = event.path("replyToken").asText();
-                        replyMenuQuick(replyToken);
-                        continue;
-                    }
-
-                    // 文字訊息
+                    // 處理文字訊息
                     if ("message".equals(type)
                             && "text".equals(event.path("message").path("type").asText())) {
 
@@ -87,7 +78,7 @@ public class LineWebhookController {
                         String text = event.path("message").path("text").asText().trim();
                         String userId = event.path("source").path("userId").asText();
 
-                        // ✅【新增】改名引導：若在等待新名字，這次輸入直接當作新名字
+                        // 改名互動模式
                         if (renamePending.getOrDefault(userId, false)) {
                             if ("取消".equals(text)) {
                                 renamePending.put(userId, false);
@@ -108,18 +99,71 @@ public class LineWebhookController {
                             continue;
                         }
 
+                        // ✅ 停用帳戶
+                        if ("停用帳戶".equals(text)) {
+                            try {
+                                bankService.deactivateAccount(userId);
+                                replyTextWithMenu(replyToken, "✅ 帳戶已停用（之後可以輸入『註冊 名字』重新啟用）");
+                            } catch (Exception ex) {
+                                replyError(replyToken, "停用失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
+
+                        // ✅ 刪除帳戶
+                        if ("刪除帳戶".equals(text)) {
+                            try {
+                                bankService.deleteAccount(userId);
+                                replyTextWithMenu(replyToken, "✅ 帳戶已刪除（含交易紀錄）");
+                            } catch (Exception ex) {
+                                replyError(replyToken, "刪除失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
+
+                        // ✅ 註冊帳戶
+                        if (text.startsWith("註冊")) {
+                            try {
+                                String reply = handleCommand(userId, text);
+                                replyTextWithMenu(replyToken, reply);
+                            } catch (Exception ex) {
+                                replyError(replyToken, "註冊失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
+
+                        // ✅ 天氣查詢
+                        if (text.startsWith("天氣")) {
+                            String[] parts = text.split("\\s+");
+                            if (parts.length < 3) {
+                                replyTextWithMenu(replyToken,
+                                        "⚠️ 查詢失敗，請輸入格式：天氣 縣市 鄉鎮，例如：天氣 臺北市 文山區");
+                            } else {
+                                String city = parts[1];
+                                String town = parts[2];
+                                try {
+                                    String bubble = weatherService.buildWeatherFlexMessage(city, town);
+                                    replyFlex(replyToken, "天氣資訊", bubble);
+                                } catch (Exception ex) {
+                                    replyError(replyToken, "天氣查詢失敗：" + ex.getMessage());
+                                }
+                            }
+                            continue;
+                        }
+
+                        // ✅ 選單快捷
                         if (isMenuKeyword(text)) { replyMenuQuick(replyToken); continue; }
                         if ("存款".equals(text)) { replyAmountQuick(replyToken, "deposit"); continue; }
                         if ("提款".equals(text)) { replyAmountQuick(replyToken, "withdraw"); continue; }
 
-                        // ✅【新增】「改名」→ 先提示輸入新名字（不用再打「改名 XXX」）
+                        // ✅ 改名（觸發互動模式）
                         if ("改名".equals(text)) {
                             renamePending.put(userId, true);
                             replyTextWithMenu(replyToken, "請輸入新名字（或輸入「取消」退出）：");
                             continue;
                         }
 
-                        // ✅【新增】餘額/明細 改為 Flex 回覆（更好看）
+                        // ✅ 查餘額
                         if ("餘額".equals(text)) {
                             try {
                                 BigDecimal bal = bankService.getBalance(userId);
@@ -129,6 +173,8 @@ public class LineWebhookController {
                             }
                             continue;
                         }
+
+                        // ✅ 查交易明細
                         if ("明細".equals(text)) {
                             try {
                                 List<Transaction> list = bankService.lastTransactions(userId);
@@ -143,7 +189,7 @@ public class LineWebhookController {
                             continue;
                         }
 
-                        // 直接處理「存 1000 / 提 500」→ 回 Flex
+                        // ✅ 存款（文字輸入格式：存 1000）
                         if (text.matches("^存\\s+\\d+(\\.\\d{1,2})?$")) {
                             try {
                                 String num = text.split("\\s+")[1];
@@ -156,6 +202,8 @@ public class LineWebhookController {
                             }
                             continue;
                         }
+
+                        // ✅ 提款（文字輸入格式：提 500）
                         if (text.matches("^提\\s+\\d+(\\.\\d{1,2})?$")) {
                             try {
                                 String num = text.split("\\s+")[1];
@@ -169,7 +217,7 @@ public class LineWebhookController {
                             continue;
                         }
 
-                        // 其他指令仍用原文字回覆＋快捷鍵（保留你的既有行為）
+                        // 其他 → 呼叫 handleCommand
                         String reply = handleCommand(userId, text);
                         if (reply == null || reply.isBlank()) {
                             replyMenuQuick(replyToken);
@@ -178,10 +226,10 @@ public class LineWebhookController {
                         }
                     }
 
-                    // Postback（點金額按鈕）→ 直接回 Flex
+                    // ✅ Postback（處理快捷金額操作）
                     if ("postback".equals(type)) {
                         String replyToken = event.path("replyToken").asText();
-                        String data = event.path("postback").path("data").asText(); // action=deposit&amount=500
+                        String data = event.path("postback").path("data").asText();
                         String userId = event.path("source").path("userId").asText();
                         handlePostback(replyToken, userId, data);
                     }
@@ -194,45 +242,7 @@ public class LineWebhookController {
         }
     }
 
-    /** 指令解析（仍保留打字版：餘額 / 明細 / 註冊 / 改名） */
-    private String handleCommand(String userId, String text) {
-        try {
-            if (text.startsWith("註冊")) {
-                String name = text.replaceFirst("^註冊\\s*", "");
-                if (name.isBlank()) name = "用戶";
-                var acc = bankService.register(userId, name);
-                return "註冊成功：" + acc.getName() + "\n目前餘額：" + acc.getBalance();
-            }
-            // 保留你原本的「改名 XXX」寫法（與引導式並存）
-            if (text.startsWith("改名")) {
-                String newName = text.replaceFirst("^改名\\s*", "").trim();
-                if (newName.isBlank()) return "請輸入新名字，例如：改名 Alan";
-                var acc = bankService.rename(userId, newName);
-                return "改名成功：" + acc.getName();
-            }
-            // 注意：真正的「餘額 / 明細」現在在 webhook 內已用 Flex 處理，這裡保留原文字版以相容
-            if (text.equals("餘額")) {
-                return "目前餘額：" + bankService.getBalance(userId);
-            }
-            if (text.equals("明細")) {
-                List<Transaction> list = bankService.lastTransactions(userId);
-                if (list.isEmpty()) return "尚無交易紀錄";
-                StringJoiner sj = new StringJoiner("\n");
-                list.stream().limit(5).forEach(tx -> sj.add(
-                        (tx.getType() == TransactionType.DEPOSIT ? "存" : "提")
-                                + " " + tx.getAmount() + " @ " + tx.getCreatedAt()));
-                return "最近交易（最多 5 筆）：\n" + sj;
-            }
-        } catch (IllegalArgumentException ex) {
-            return "錯誤：" + ex.getMessage();
-        } catch (Exception ex) {
-            ex.printStackTrace();
-            return "系統發生錯誤，請稍後再試";
-        }
-        return null;
-    }
-
-    /** Postback：action=deposit/withdraw&amount=數字（直接回 Flex） */
+    /** Postback：處理存提款 */
     private void handlePostback(String replyToken, String userId, String data) {
         try {
             if (data == null || data.isBlank()) {
@@ -263,12 +273,61 @@ public class LineWebhookController {
             }
             replyTextWithMenu(replyToken, "無效的操作");
         } catch (Exception e) {
-            // ✅ 錯誤訊息更親切
             replyError(replyToken, "操作失敗：" + e.getMessage());
         }
     }
 
-    /** 文字回覆 + 常用快捷鍵（防空字串；加入「改名」） */
+    /** Flex 回覆 */
+    private void replyFlex(String replyToken, String altText, String bubbleJson) {
+        try {
+            ObjectNode root = objectMapper.createObjectNode();
+            root.put("replyToken", replyToken);
+
+            ArrayNode messages = objectMapper.createArrayNode();
+            ObjectNode msg = objectMapper.createObjectNode();
+            msg.put("type", "flex");
+            msg.put("altText", altText);
+            msg.set("contents", objectMapper.readTree(bubbleJson));
+
+            messages.add(msg);
+            root.set("messages", messages);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(channelAccessToken);
+
+            HttpEntity<String> entity =
+                    new HttpEntity<>(objectMapper.writeValueAsString(root), headers);
+
+            ResponseEntity<String> response = restTemplate.exchange(
+                    "https://api.line.me/v2/bot/message/reply",
+                    HttpMethod.POST, entity, String.class
+            );
+
+            System.out.println("LINE 回應: " + response.getStatusCode() + " " + response.getBody());
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            replyTextWithMenu(replyToken, altText); // fallback
+        }
+    }
+
+    /** 驗證簽章 */
+    private boolean verifySignature(String body, String signature, String secret) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] digest = mac.doFinal(body.getBytes(StandardCharsets.UTF_8));
+            String expected = Base64.getEncoder().encodeToString(digest);
+            return MessageDigest.isEqual(
+                    expected.getBytes(StandardCharsets.UTF_8),
+                    signature.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 文字回覆（含快捷鍵） */
     private void replyTextWithMenu(String replyToken, String message) {
         try {
             if (message == null || message.isBlank()) {
@@ -289,7 +348,10 @@ public class LineWebhookController {
                       {"type":"action","action":{"type":"message","label":"明細","text":"明細"}},
                       {"type":"action","action":{"type":"message","label":"存款","text":"存款"}},
                       {"type":"action","action":{"type":"message","label":"提款","text":"提款"}},
-                      {"type":"action","action":{"type":"message","label":"改名","text":"改名"}}
+                      {"type":"action","action":{"type":"message","label":"改名","text":"改名"}},
+                      {"type":"action","action":{"type":"message","label":"停用帳戶","text":"停用帳戶"}},
+                      {"type":"action","action":{"type":"message","label":"刪除帳戶","text":"刪除帳戶"}},
+                      {"type":"action","action":{"type":"message","label":"天氣","text":"天氣 臺北市 文山區"}}
                     ]
                   }
                 }
@@ -306,28 +368,31 @@ public class LineWebhookController {
         }
     }
 
-    /** 主選單（清楚顯示標題） */
+    /** 主選單 */
     private void replyMenuQuick(String replyToken) {
         try {
             String url = "https://api.line.me/v2/bot/message/reply";
             String payload = """
             {
-            "replyToken":"%s",
-            "messages":[
+              "replyToken":"%s",
+              "messages":[
                 {
-                "type":"text",
-                "text":"請選擇功能：",
-                "quickReply":{
+                  "type":"text",
+                  "text":"請選擇功能：",
+                  "quickReply":{
                     "items":[
-                    {"type":"action","action":{"type":"message","label":"查餘額","text":"餘額"}},
-                    {"type":"action","action":{"type":"message","label":"存款","text":"存款"}},
-                    {"type":"action","action":{"type":"message","label":"提款","text":"提款"}},
-                    {"type":"action","action":{"type":"message","label":"交易明細","text":"明細"}},
-                    {"type":"action","action":{"type":"message","label":"改名","text":"改名"}}
+                      {"type":"action","action":{"type":"message","label":"查餘額","text":"餘額"}},
+                      {"type":"action","action":{"type":"message","label":"存款","text":"存款"}},
+                      {"type":"action","action":{"type":"message","label":"提款","text":"提款"}},
+                      {"type":"action","action":{"type":"message","label":"交易明細","text":"明細"}},
+                      {"type":"action","action":{"type":"message","label":"改名","text":"改名"}},
+                      {"type":"action","action":{"type":"message","label":"停用帳戶","text":"停用帳戶"}},
+                      {"type":"action","action":{"type":"message","label":"刪除帳戶","text":"刪除帳戶"}},
+                      {"type":"action","action":{"type":"message","label":"天氣","text":"天氣 臺北市 文山區"}}
                     ]
+                  }
                 }
-                }
-            ]
+              ]
             }
             """.formatted(replyToken);
 
@@ -340,12 +405,12 @@ public class LineWebhookController {
         }
     }
 
-    /** 顯示金額快捷鍵（ATM 風格） */
+    /** 金額快捷鍵 */
     private void replyAmountQuick(String replyToken, String action) {
         try {
             String title = "deposit".equals(action) ? "請選擇存款金額：" : "請選擇提款金額：";
             String actionLabel = "deposit".equals(action) ? "存 " : "提 ";
-            String actionName = action; // deposit / withdraw
+            String actionName = action;
 
             String payload = """
             {
@@ -389,108 +454,54 @@ public class LineWebhookController {
         }
     }
 
-    /** 以 Flex 卡片回覆（altText 為無法顯示時的替代文字） */
-    private void replyFlex(String replyToken, String altText, String flexJson) {
-        try {
-            ObjectNode root = objectMapper.createObjectNode();
-            root.put("replyToken", replyToken);
-
-            ArrayNode messages = objectMapper.createArrayNode();
-            ObjectNode msg = objectMapper.createObjectNode();
-            msg.put("type", "flex");
-            msg.put("altText", altText);
-            // contents 必須是物件，不是字串
-            msg.set("contents", objectMapper.readTree(flexJson));
-            messages.add(msg);
-
-            root.set("messages", messages);
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(channelAccessToken);
-
-            HttpEntity<String> entity =
-                    new HttpEntity<>(objectMapper.writeValueAsString(root), headers);
-
-            restTemplate.exchange(
-                    "https://api.line.me/v2/bot/message/reply",
-                    HttpMethod.POST, entity, String.class
-            );
-        } catch (Exception e) {
-            e.printStackTrace();
-            // 失敗則退回文字
-            replyTextWithMenu(replyToken, altText);
-        }
-    }
-
-    /** 建立交易摘要 Flex JSON（Bubble，美化版） */
+    /** 建立交易摘要 Flex */
     private String buildTransactionFlex(String type, BigDecimal amount, BigDecimal newBalance, String note) {
         String amt = amount.stripTrailingZeros().toPlainString();
         String bal = newBalance.stripTrailingZeros().toPlainString();
         String memo = (note == null || note.isBlank()) ? "-" : note;
-
-        // 根據交易類型切換顏色
         String headerColor = "存款".equals(type) ? "#DFF6DD" : "#F9D6D5";
 
         return """
         {
-        "type": "bubble",
-        "size": "mega",
-        "header": {
+          "type": "bubble",
+          "size": "mega",
+          "header": {
             "type": "box",
             "layout": "vertical",
             "backgroundColor": "%s",
             "contents": [
-            { "type": "text", "text": "交易成功（%s）", "weight": "bold", "size": "lg", "align":"center" }
+              { "type": "text", "text": "交易成功（%s）", "weight": "bold", "size": "lg", "align":"center" }
             ]
-        },
-        "body": {
+          },
+          "body": {
             "type": "box",
             "layout": "vertical",
             "spacing": "md",
             "contents": [
-            {
-                "type": "text",
-                "text": "$%s",
-                "weight": "bold",
-                "size": "xxl",
-                "color": "#333333",
-                "align": "center"
-            },
-            {
-                "type": "box",
-                "layout": "baseline",
-                "spacing": "sm",
-                "contents": [
-                {"type":"text","text":"💰 新餘額","size":"sm","color":"#888888","flex":2},
-                {"type":"text","text":"$%s","size":"sm","wrap":true,"flex":5}
-                ]
-            },
-            {
+              { "type": "text", "text": "$%s", "weight": "bold", "size": "xxl", "align": "center" },
+              {
                 "type": "box",
                 "layout": "baseline",
                 "contents": [
-                {"type":"text","text":"備註","size":"sm","color":"#888888","flex":2},
-                {"type":"text","text":"%s","size":"sm","wrap":true,"flex":5}
+                  {"type":"text","text":"💰 新餘額","size":"sm","color":"#888888","flex":2},
+                  {"type":"text","text":"$%s","size":"sm","flex":5}
                 ]
-            }
+              },
+              {
+                "type": "box",
+                "layout": "baseline",
+                "contents": [
+                  {"type":"text","text":"備註","size":"sm","color":"#888888","flex":2},
+                  {"type":"text","text":"%s","size":"sm","flex":5}
+                ]
+              }
             ]
-        },
-        "footer": {
-            "type": "box",
-            "layout": "horizontal",
-            "spacing": "md",
-            "contents": [
-            { "type":"button", "style":"link", "action":{"type":"message","label":"餘額","text":"餘額"}, "height":"sm" },
-            { "type":"button", "style":"link", "action":{"type":"message","label":"明細","text":"明細"}, "height":"sm" },
-            { "type":"button", "style":"link", "action":{"type":"message","label":"選單","text":"選單"}, "height":"sm" }
-            ]
-        }
+          }
         }
         """.formatted(headerColor, type, amt, bal, memo);
     }
 
-    /** ✅【新增】餘額 Flex */
+    /** 餘額 Flex */
     private String buildBalanceFlex(BigDecimal balance) {
         String bal = balance.stripTrailingZeros().toPlainString();
         return """
@@ -508,7 +519,7 @@ public class LineWebhookController {
         """.formatted(bal);
     }
 
-    /** ✅【新增】交易明細 Flex（最多 5 筆，避免 JSON 尾逗號） */
+    /** 交易明細 Flex */
     private String buildTransactionListFlex(List<Transaction> list) {
         StringBuilder rows = new StringBuilder();
         int i = 0;
@@ -551,29 +562,47 @@ public class LineWebhookController {
         """.formatted(rows.length() > 0 ? "," + rows : "");
     }
 
-    /** 驗證 X-Line-Signature */
-    private boolean verifySignature(String body, String signature, String secret) {
+    /** 指令解析 */
+    private String handleCommand(String userId, String text) {
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] digest = mac.doFinal(body.getBytes(StandardCharsets.UTF_8));
-            String expected = Base64.getEncoder().encodeToString(digest);
-            return MessageDigest.isEqual(
-                    expected.getBytes(StandardCharsets.UTF_8),
-                    signature.getBytes(StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            return false;
+            if (text.startsWith("註冊")) {
+                String name = text.replaceFirst("^註冊\\s*", "");
+                if (name.isBlank()) name = "用戶";
+                var acc = bankService.register(userId, name);
+                return "註冊成功：" + acc.getName() + "\n目前餘額：" + acc.getBalance();
+            }
+            if (text.startsWith("改名")) {
+                String newName = text.replaceFirst("^改名\\s*", "").trim();
+                if (newName.isBlank()) return "請輸入新名字，例如：改名 Alan";
+                var acc = bankService.rename(userId, newName);
+                return "改名成功：" + acc.getName();
+            }
+            if (text.equals("餘額")) {
+                return "目前餘額：" + bankService.getBalance(userId);
+            }
+            if (text.equals("明細")) {
+                List<Transaction> list = bankService.lastTransactions(userId);
+                if (list.isEmpty()) return "尚無交易紀錄";
+                StringJoiner sj = new StringJoiner("\n");
+                list.stream().limit(5).forEach(tx -> sj.add(
+                        (tx.getType() == TransactionType.DEPOSIT ? "存" : "提")
+                                + " " + tx.getAmount() + " @ " + tx.getCreatedAt()));
+                return "最近交易（最多 5 筆）：\n" + sj;
+            }
+        } catch (Exception ex) {
+            return "系統發生錯誤：" + ex.getMessage();
         }
+        return null;
     }
 
+    /** 主選單判斷 */
     private boolean isMenuKeyword(String text) {
         return "選單".equals(text) || "功能".equals(text)
                 || "menu".equalsIgnoreCase(text) || "開始".equals(text);
     }
 
-    /** ✅【新增】更親切的錯誤訊息統一回覆 */
+    /** 錯誤回覆 */
     private void replyError(String replyToken, String message) {
         replyTextWithMenu(replyToken, "❌ " + message + "\n💡 您可以輸入「選單」查看功能");
     }
 }
-    
