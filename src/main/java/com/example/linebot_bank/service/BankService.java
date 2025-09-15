@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class BankService {
@@ -29,35 +30,22 @@ public class BankService {
     public Account register(String lineUserId, String name) {
         String newName = normalizeName(name);
 
-        // 1) 先找 active=true 的帳戶
-        var activeOpt = accountRepository.findByLineUserIdAndActiveTrue(lineUserId);
-        if (activeOpt.isPresent()) {
-            var acc = activeOpt.get();
-            if (!newName.equals(acc.getName())) {
-                acc.setName(newName);
-                accountRepository.saveAndFlush(acc); // 🔑 強制 flush
-            }
-            return acc;
-        }
+        Optional<Account> existingAccountOpt = accountRepository.findByLineUserId(lineUserId);
 
-        // 2) 若有任何帳戶（可能已停用）→ 重新啟用 + 更新名稱
-        var anyOpt = accountRepository.findByLineUserId(lineUserId);
-        if (anyOpt.isPresent()) {
-            var acc = anyOpt.get();
-            acc.setActive(true); // 🔑 強制啟用
+        if (existingAccountOpt.isPresent()) {
+            Account acc = existingAccountOpt.get();
+            acc.setActive(true);
             acc.setName(newName);
             if (acc.getBalance() == null) {
-                acc.setBalance(BigDecimal.ZERO); // 🔑 保險
+                acc.setBalance(BigDecimal.ZERO);
             }
-            accountRepository.saveAndFlush(acc);
-            return acc;
+            return accountRepository.saveAndFlush(acc);
+        } else {
+            Account newAccount = new Account(lineUserId, newName);
+            newAccount.setBalance(BigDecimal.ZERO);
+            newAccount.setActive(true);
+            return accountRepository.saveAndFlush(newAccount);
         }
-
-        // 3) 完全沒有 → 新建
-        Account acc = new Account(lineUserId, newName);
-        acc.setBalance(BigDecimal.ZERO);
-        acc.setActive(true);
-        return accountRepository.saveAndFlush(acc); // 🔑 新建後馬上 flush
     }
 
     /** 改名 */
@@ -84,14 +72,73 @@ public class BankService {
         return getActiveAccount(lineUserId);
     }
 
-    /** 存款 */
+    /** 存款 - 加入除錯日誌 */
     @Transactional
     public BigDecimal deposit(String lineUserId, BigDecimal amount, String note) {
+        System.out.println("=== 開始存款流程 ===");
+        System.out.println("lineUserId: " + lineUserId);
+        System.out.println("amount: " + amount);
+        System.out.println("note: " + note);
+        
         validateAmount(amount);
-        var acc = getActiveAccountForUpdate(lineUserId);
+        
+        // 先確認帳戶存在，如果不存在則自動註冊
+        Account acc;
+        try {
+            acc = getActiveAccountForUpdate(lineUserId);
+            System.out.println("找到現有帳戶，ID: " + acc.getId());
+        } catch (IllegalArgumentException e) {
+            System.out.println("帳戶不存在，開始自動註冊");
+            // 帳戶不存在，自動註冊一個預設帳戶
+            acc = register(lineUserId, "用戶");
+            System.out.println("註冊完成，帳戶 ID: " + acc.getId());
+            
+            // 重新取得帳戶以確保有正確的 ID
+            acc = getActiveAccountForUpdate(lineUserId);
+            System.out.println("重新取得帳戶，ID: " + acc.getId());
+        }
+        
+        // 確認帳戶 ID 不為 null
+        if (acc.getId() == null) {
+            System.out.println("ERROR: 帳戶 ID 為 null");
+            throw new IllegalStateException("帳戶 ID 為空，無法進行交易");
+        }
+        
+        System.out.println("更新前餘額: " + acc.getBalance());
         acc.setBalance(acc.getBalance().add(amount));
-        transactionRepository.save(new Transaction(acc, TransactionType.DEPOSIT, amount, note));
-        accountRepository.saveAndFlush(acc); // 保險：更新餘額馬上存
+        System.out.println("更新後餘額: " + acc.getBalance());
+        
+        // 先保存並刷新帳戶，確保 ID 正確設置
+        acc = accountRepository.saveAndFlush(acc);
+        System.out.println("保存帳戶後，ID: " + acc.getId());
+        
+        // 再次確認 ID
+        if (acc.getId() == null) {
+            System.out.println("ERROR: 保存後帳戶 ID 仍為 null");
+            throw new IllegalStateException("保存帳戶後 ID 仍為空");
+        }
+        
+        // 創建交易記錄
+        System.out.println("準備創建交易記錄...");
+        System.out.println("Account ID: " + acc.getId());
+        System.out.println("Transaction Type: " + TransactionType.DEPOSIT);
+        System.out.println("Amount: " + amount);
+        System.out.println("Note: " + note);
+        
+        Transaction transaction = new Transaction(acc, TransactionType.DEPOSIT, amount, note);
+        System.out.println("Transaction 建立完成，account: " + transaction.getAccount());
+        System.out.println("Transaction account ID: " + transaction.getAccount().getId());
+        
+        try {
+            transactionRepository.save(transaction);
+            System.out.println("交易記錄保存成功");
+        } catch (Exception e) {
+            System.out.println("ERROR: 保存交易記錄時發生錯誤: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
+        
+        System.out.println("=== 存款流程完成 ===");
         return acc.getBalance();
     }
 
@@ -99,13 +146,38 @@ public class BankService {
     @Transactional
     public BigDecimal withdraw(String lineUserId, BigDecimal amount, String note) {
         validateAmount(amount);
-        var acc = getActiveAccountForUpdate(lineUserId);
+        
+        // 確認帳戶存在
+        Account acc;
+        try {
+            acc = getActiveAccountForUpdate(lineUserId);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("請先註冊帳戶才能進行提款");
+        }
+        
+        // 確認帳戶 ID 不為 null
+        if (acc.getId() == null) {
+            throw new IllegalStateException("帳戶 ID 為空，無法進行交易");
+        }
+        
         if (acc.getBalance().compareTo(amount) < 0) {
             throw new IllegalArgumentException("餘額不足");
         }
+        
         acc.setBalance(acc.getBalance().subtract(amount));
-        transactionRepository.save(new Transaction(acc, TransactionType.WITHDRAW, amount, note));
-        accountRepository.saveAndFlush(acc);
+        
+        // 先保存並刷新帳戶
+        acc = accountRepository.saveAndFlush(acc);
+        
+        // 再次確認 ID
+        if (acc.getId() == null) {
+            throw new IllegalStateException("保存帳戶後 ID 仍為空");
+        }
+        
+        // 創建交易記錄
+        Transaction transaction = new Transaction(acc, TransactionType.WITHDRAW, amount, note);
+        transactionRepository.save(transaction);
+
         return acc.getBalance();
     }
 
@@ -119,11 +191,7 @@ public class BankService {
     /** 停用帳戶 */
     @Transactional
     public void deactivateAccount(String lineUserId) {
-        var activeOpt = accountRepository.findByLineUserIdAndActiveTrue(lineUserId);
-        if (activeOpt.isEmpty()) {
-            throw new IllegalArgumentException("帳戶不存在或已停用");
-        }
-        var acc = activeOpt.get();
+        var acc = getActiveAccount(lineUserId);
         acc.setActive(false);
         accountRepository.saveAndFlush(acc);
     }
@@ -137,11 +205,11 @@ public class BankService {
         }
         var acc = accOpt.get();
 
-        // 刪交易紀錄
         transactionRepository.deleteAllByAccount(acc);
+        transactionRepository.flush(); 
 
-        // 刪帳戶
         accountRepository.delete(acc);
+        accountRepository.flush(); 
     }
 
     // ===== helpers =====
