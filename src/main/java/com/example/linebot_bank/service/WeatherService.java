@@ -133,6 +133,8 @@ public class WeatherService {
             if (!isArray(times)) return textBubble("❌ 沒有時間序列");
 
             ZoneId tz = ZoneId.of("Asia/Taipei");
+            ZonedDateTime now = ZonedDateTime.now(tz);
+            String updateTime = now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm"));
             List<String> bubbles = new ArrayList<>();
             DateTimeFormatter dtf = DateTimeFormatter.ofPattern("MM/dd HH:mm");
 
@@ -146,17 +148,18 @@ public class WeatherService {
                 String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, start);
 
                 String bubble = """
-                { "type": "bubble", "size": "mega",
-                  "body": { "type": "box", "layout": "vertical", "spacing": "sm",
-                    "contents": [
-                      { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
-                      { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
-                      { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
-                      { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" }
-                    ] } }
-                """.formatted(city, town,
-                        start.format(dtf),
-                        safe(wx), safe(temp), safe(pop));
+                    { "type": "bubble", "size": "mega",
+                      "body": { "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                          { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
+                          { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
+                          { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
+                          { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" },
+                          { "type": "text", "text": "📅 更新時間：%s", "size": "sm", "color": "#555555", "margin": "sm" }
+                        ] } }
+                    """.formatted(j(city), j(town),
+                            j(start.format(dtf)),
+                            j(safe(wx)), j(safe(temp)), j(safe(pop)), j(updateTime));
                 bubbles.add(bubble);
             }
 
@@ -183,6 +186,8 @@ public class WeatherService {
             if (loc == null) return textBubble("⚠️ 找不到鄉鎮");
 
             ZoneId tz = ZoneId.of("Asia/Taipei");
+            ZonedDateTime now = ZonedDateTime.now(tz);
+            String updateTime = now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm"));
             LocalDate targetDate = LocalDate.now(tz);
             if ("明天".equals(whenToken)) targetDate = targetDate.plusDays(1);
 
@@ -197,16 +202,17 @@ public class WeatherService {
                 String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, target);
 
                 String bubble = """
-                { "type": "bubble", "size": "mega",
-                  "body": { "type": "box", "layout": "vertical", "spacing": "sm",
-                    "contents": [
-                      { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
-                      { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
-                      { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
-                      { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" }
-                    ] } }
-                """.formatted(city, town,
-                        target.format(dtf), safe(wx), safe(temp), safe(pop));
+                    { "type": "bubble", "size": "mega",
+                      "body": { "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                          { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
+                          { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
+                          { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
+                          { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" },
+                          { "type": "text", "text": "📅 更新時間：%s", "size": "sm", "color": "#555555", "margin": "sm" }
+                        ] } }
+                    """.formatted(j(city), j(town),
+                            j(target.format(dtf)), j(safe(wx)), j(safe(temp)), j(safe(pop)), j(updateTime));
                 bubbles.add(bubble);
             }
 
@@ -217,16 +223,17 @@ public class WeatherService {
                 String temp = pickValueNearTimeWithFallback(loc, T_NAMES, target);
                 String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, target);
                 String bubble = """
-                { "type": "bubble", "size": "mega",
-                  "body": { "type": "box", "layout": "vertical", "spacing": "sm",
-                    "contents": [
-                      { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
-                      { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
-                      { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
-                      { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" }
-                    ] } }
-                """.formatted(city, town,
-                        target.format(dtf), safe(wx), safe(temp), safe(pop));
+                    { "type": "bubble", "size": "mega",
+                      "body": { "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                          { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
+                          { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
+                          { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
+                          { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" },
+                          { "type": "text", "text": "📅 更新時間：%s", "size": "sm", "color": "#555555", "margin": "sm" }
+                        ] } }
+                    """.formatted(j(city), j(town),
+                            j(target.format(dtf)), j(safe(wx)), j(safe(temp)), j(safe(pop)), j(updateTime));
                 bubbles.add(bubble);
             }
 
@@ -235,6 +242,21 @@ public class WeatherService {
             logger.error("Daily 預報錯誤", e);
             return textBubble("❌ 查詢失敗：" + e.getMessage());
         }
+    }
+
+    private String bubbleNoHero(String title, String body) {
+        ZoneId tz = ZoneId.of("Asia/Taipei");
+        ZonedDateTime now = ZonedDateTime.now(tz);
+        String updateTime = now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm"));
+        return """
+            { "type": "bubble",
+              "body": { "type": "box", "layout": "vertical",
+                "contents": [
+                  { "type": "text", "text": "%s", "weight": "bold", "size": "xl", "wrap": true },
+                  { "type": "text", "text": "%s", "size": "md", "margin": "sm", "wrap": true },
+                  { "type": "text", "text": "📅 更新時間：%s", "size": "sm", "color": "#555555", "margin": "sm" }
+                ] } }
+            """.formatted(j(title), j(body), j(updateTime));
     }
 
     // ===== whenToken 解析：今天 / 明天 / HH:mm / YYYY-MM-DD / 「明天 10:00」「2025-09-18 10:00」
@@ -651,21 +673,10 @@ public class WeatherService {
     // ---- Flex（無 hero）----
     private String textBubble(String text){
         return """
-        { "type": "bubble",
-          "body": { "type": "box", "layout": "vertical",
-            "contents": [ { "type": "text", "text": "%s", "wrap": true } ] } }
-        """.formatted(j(text));
-    }
-
-    private String bubbleNoHero(String title, String body){
-        return """
-        { "type": "bubble",
-          "body": { "type": "box", "layout": "vertical",
-            "contents": [
-              { "type": "text", "text": "%s", "weight": "bold", "size": "xl", "wrap": true },
-              { "type": "text", "text": "%s", "size": "md", "margin": "sm", "wrap": true }
-            ] } }
-        """.formatted(j(title), j(body));
+            { "type": "bubble",
+              "body": { "type": "box", "layout": "vertical",
+                "contents": [ { "type": "text", "text": "%s", "wrap": true } ] } }
+            """.formatted(j(text));
     }
 
     private String j(String s){
