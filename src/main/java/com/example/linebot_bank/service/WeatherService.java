@@ -22,8 +22,7 @@ import java.util.stream.Collectors;
 @Service
 public class WeatherService {
     private static final Logger logger = LoggerFactory.getLogger(WeatherService.class);
-    // ★ 版本號更新
-    private static final String WS_VER = "UltraRobust-VERIFY-14";
+    private static final String WS_VER = "UltraRobust-VERIFY-DAILY";
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -57,14 +56,19 @@ public class WeatherService {
 
     private static Set<String> setOf(String... s){ return new HashSet<>(Arrays.asList(s)); }
 
-    /* 兩參數：維持舊介面 */
+    /* 舊版：單一時段 */
     public String buildWeatherFlexMessage(String city, String town){
         return buildWeatherFlexMessage(city, town, null);
     }
 
-    /* 三參數：支援 whenToken（今天 / 明天 / HH:mm / YYYY-MM-DD / 明天 10:00 / 2025-09-18 10:00） */
+    /* 三參數：支援 whenToken */
     public String buildWeatherFlexMessage(String city, String town, String whenToken) {
         logger.warn(">>> ENTER WeatherService.buildWeatherFlexMessage ver={}", WS_VER);
+
+        // 如果使用者輸入今天/明天 → 改用 daily 查詢
+        if ("今天".equals(whenToken) || "明天".equals(whenToken)) {
+            return buildDailyWeatherFlex(city, town, whenToken);
+        }
 
         String cCity = city.replace("台","臺").trim();
         String cTown = town.replace("台","臺").trim();
@@ -74,93 +78,162 @@ public class WeatherService {
         ZoneId tz = ZoneId.of("Asia/Taipei");
         ZonedDateTime now = ZonedDateTime.now(tz);
         ZonedDateTime target = parseWhenToken(whenToken, now, tz);
-        if (target == null) return textBubble("⚠️ 時間格式錯誤，請使用：今天 / 明天 / HH:mm / YYYY-MM-DD / 明天 HH:mm");
+        if (target == null) return textBubble("⚠️ 時間格式錯誤");
 
         if (target.isAfter(now.plusHours(48))) return textBubble("⚠️ 只能查詢未來 48 小時內的時段。");
 
         try {
-            // 1) 先帶 elementName
             String url = UriComponentsBuilder.fromHttpUrl("https://opendata.cwa.gov.tw/api/v1/rest/datastore/"+datasetId)
                     .queryParam("Authorization", apiKey)
                     .queryParam("format", "JSON")
                     .queryParam("elementName", "WeatherDescription,Wx,T,Temperature,PoP3h,PoP6h,PoP12h,ProbabilityOfPrecipitation")
                     .toUriString();
-            logger.info("[CWA] URL = {}", url);
             String json = restTemplate.getForObject(url, String.class);
-            logger.info("[CWA] response head = {}", (json==null?"null":json.substring(0, Math.min(json.length(),300))));
             ArrayNode locations = findAllLocationsAnyShape(objectMapper.readTree(json==null?"{}":json));
-            logger.warn("[CWA] scan-1: containersFound={}, locationsTotal={}", containersFound, locations.size());
+            if (locations.size()==0) return textBubble("❌ 找不到資料");
 
-            // 2) 不帶 elementName
-            if (locations.size()==0){
-                String url2 = UriComponentsBuilder.fromHttpUrl("https://opendata.cwa.gov.tw/api/v1/rest/datastore/"+datasetId)
-                        .queryParam("Authorization", apiKey)
-                        .queryParam("format", "JSON")
-                        .toUriString();
-                logger.warn("[CWA] retry-2 (no elementName) -> {}", url2);
-                String json2 = restTemplate.getForObject(url2, String.class);
-                locations = findAllLocationsAnyShape(objectMapper.readTree(json2==null?"{}":json2));
-                logger.warn("[CWA] scan-2: containersFound={}, locationsTotal={}", containersFound, locations.size());
-            }
-
-            // 3) 加 locationName
-            if (locations.size()==0){
-                String url3 = UriComponentsBuilder.fromHttpUrl("https://opendata.cwa.gov.tw/api/v1/rest/datastore/"+datasetId)
-                        .queryParam("Authorization", apiKey)
-                        .queryParam("format", "JSON")
-                        .queryParam("locationName", cTown)
-                        .queryParam("elementName", "WeatherDescription,Wx,T,Temperature,PoP3h,PoP6h,PoP12h,ProbabilityOfPrecipitation")
-                        .toUriString();
-                logger.warn("[CWA] retry-3 (locationName='{}') -> {}", cTown, url3);
-                String json3 = restTemplate.getForObject(url3, String.class);
-                locations = findAllLocationsAnyShape(objectMapper.readTree(json3==null?"{}":json3));
-                logger.warn("[CWA] scan-3: containersFound={}, locationsTotal={}", containersFound, locations.size());
-            }
-
-            if (locations.size()==0) return textBubble("❌ 找不到資料，請稍後再試。");
-
-            // 鄉鎮列表
-            List<String> towns = new ArrayList<>();
-            for (JsonNode loc : locations) towns.add(getLocationName(loc));
-            logger.warn("[CWA] towns in {} => {}", cCity, String.join(", ", towns));
-            System.out.println("[CWA] towns in " + cCity + " => " + String.join(", ", towns));
-
-            // 找特定鄉鎮
             JsonNode loc = findTown(locations, cTown);
-            if (loc == null){
-                String sample = towns.stream().limit(8).collect(Collectors.joining("、"));
-                return textBubble("⚠️ 在「"+cCity+"」找不到鄉鎮「"+cTown+"」。\n可用地區（部分）：\n"+sample);
-            }
-            String locName = getLocationName(loc);
+            if (loc == null) return textBubble("⚠️ 找不到鄉鎮「"+cTown+"」");
 
-            // 偵錯列印
-            debugDumpElements(loc);
-
-            // 對齊時段
             Interval interval = bestInterval(loc, target);
-            String startFmt = interval.startFmt;      // HH:mm
-            String endFmt   = interval.endFmt;        // HH:mm
-            String dateFmt  = target.format(DateTimeFormatter.ofPattern("yyyy/MM/dd")); // ★ 新增：日期
-
-            // 抓數值（就近取值＋補值）
+            String dateFmt  = target.format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
             String wx  = pickValueNearTimeWithFallback(loc, WX_NAMES,  target);
             String t   = pickValueNearTimeWithFallback(loc, T_NAMES,   target);
             String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, target);
-            logger.warn("[CWA] resolved values => wx='{}', t='{}', pop='{}'", wx, t, pop);
 
-            String updateTime = ZonedDateTime.now(tz).format(DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm"));
-
-            String title = "📍 " + cCity + " " + locName;
-            // ★ 這裡把日期加上去：yyyy/MM/dd HH:mm~HH:mm
-            String body  = "🕒 " + dateFmt + " " + startFmt + "~" + endFmt + "\n"
+            String title = "📍 " + cCity + " " + getLocationName(loc);
+            String body  = "🕒 " + dateFmt + " " + interval.startFmt + "~" + interval.endFmt + "\n"
                          + "🌤️ " + safe(wx) + "\n"
-                         + "🌡️ 氣溫 " + (blank(t) ? "-" : t + "°C") + "，降雨機率 " + (blank(pop) ? "-" : pop + "%") + "\n"
-                         + "更新時間：" + updateTime;
+                         + "🌡️ 氣溫 " + safe(t) + "°C，降雨 " + safe(pop) + "%";
 
             return bubbleNoHero(title, body);
         } catch (Exception e){
-            logger.error("天氣查詢發生錯誤", e);
+            logger.error("天氣查詢錯誤", e);
             return textBubble("❌ 天氣查詢失敗：" + e.getMessage());
+        }
+    }
+
+    /** 48 小時預報 (3 小時一筆，共 16 筆) */
+    public String build48hWeatherFlex(String city, String town) {
+        String datasetId = CITY_CODE_MAP.get(city);
+        if (datasetId == null) return textBubble("⚠️ 找不到縣市");
+
+        try {
+            String url = UriComponentsBuilder.fromHttpUrl("https://opendata.cwa.gov.tw/api/v1/rest/datastore/" + datasetId)
+                    .queryParam("Authorization", apiKey)
+                    .queryParam("format", "JSON")
+                    .toUriString();
+            String json = restTemplate.getForObject(url, String.class);
+            ArrayNode locations = findAllLocationsAnyShape(objectMapper.readTree(json==null?"{}":json));
+            JsonNode loc = findTown(locations, town);
+            if (loc == null) return textBubble("⚠️ 找不到鄉鎮");
+
+            JsonNode tElement = findFirstElementByNames(loc, T_NAMES);
+            ArrayNode times = getArrayCI(tElement, "time", "Time");
+            if (!isArray(times)) return textBubble("❌ 沒有時間序列");
+
+            ZoneId tz = ZoneId.of("Asia/Taipei");
+            List<String> bubbles = new ArrayList<>();
+            DateTimeFormatter dtf = DateTimeFormatter.ofPattern("MM/dd HH:mm");
+
+            for (int i = 0; i < Math.min(times.size(), 16); i++) {
+                JsonNode ti = times.get(i);
+                ZonedDateTime start = parseZ(getTextCI(ti, "startTime", "dataTime"), tz);
+                if (start == null) continue;
+
+                String wx = pickValueNearTimeWithFallback(loc, WX_NAMES, start);
+                String temp = pickValueNearTimeWithFallback(loc, T_NAMES, start);
+                String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, start);
+
+                String bubble = """
+                { "type": "bubble", "size": "mega",
+                  "body": { "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                      { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
+                      { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
+                      { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
+                      { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" }
+                    ] } }
+                """.formatted(city, town,
+                        start.format(dtf),
+                        safe(wx), safe(temp), safe(pop));
+                bubbles.add(bubble);
+            }
+
+            return "{ \"type\": \"carousel\", \"contents\": ["+String.join(",", bubbles)+"] }";
+        } catch (Exception e) {
+            logger.error("48h 預報錯誤", e);
+            return textBubble("❌ 查詢失敗：" + e.getMessage());
+        }
+    }
+
+    /** 今天 / 明天 → 固定時段 00,03,06,09,12,15,18,21 (+今天加24) */
+    public String buildDailyWeatherFlex(String city, String town, String whenToken) {
+        String datasetId = CITY_CODE_MAP.get(city);
+        if (datasetId == null) return textBubble("⚠️ 找不到縣市");
+
+        try {
+            String url = UriComponentsBuilder.fromHttpUrl("https://opendata.cwa.gov.tw/api/v1/rest/datastore/" + datasetId)
+                    .queryParam("Authorization", apiKey)
+                    .queryParam("format", "JSON")
+                    .toUriString();
+            String json = restTemplate.getForObject(url, String.class);
+            ArrayNode locations = findAllLocationsAnyShape(objectMapper.readTree(json==null?"{}":json));
+            JsonNode loc = findTown(locations, town);
+            if (loc == null) return textBubble("⚠️ 找不到鄉鎮");
+
+            ZoneId tz = ZoneId.of("Asia/Taipei");
+            LocalDate targetDate = LocalDate.now(tz);
+            if ("明天".equals(whenToken)) targetDate = targetDate.plusDays(1);
+
+            int[] hours = {0,3,6,9,12,15,18,21};
+            List<String> bubbles = new ArrayList<>();
+            DateTimeFormatter dtf = DateTimeFormatter.ofPattern("MM/dd HH:mm");
+
+            for (int h : hours) {
+                ZonedDateTime target = targetDate.atTime(h, 0).atZone(tz);
+                String wx = pickValueNearTimeWithFallback(loc, WX_NAMES, target);
+                String temp = pickValueNearTimeWithFallback(loc, T_NAMES, target);
+                String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, target);
+
+                String bubble = """
+                { "type": "bubble", "size": "mega",
+                  "body": { "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                      { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
+                      { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
+                      { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
+                      { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" }
+                    ] } }
+                """.formatted(city, town,
+                        target.format(dtf), safe(wx), safe(temp), safe(pop));
+                bubbles.add(bubble);
+            }
+
+            // 今天多加 24:00
+            if ("今天".equals(whenToken)) {
+                ZonedDateTime target = targetDate.plusDays(1).atStartOfDay(tz);
+                String wx = pickValueNearTimeWithFallback(loc, WX_NAMES, target);
+                String temp = pickValueNearTimeWithFallback(loc, T_NAMES, target);
+                String pop = pickValueNearTimeWithFallback(loc, POP_NAMES, target);
+                String bubble = """
+                { "type": "bubble", "size": "mega",
+                  "body": { "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                      { "type": "text", "text": "%s %s", "weight": "bold", "size": "lg" },
+                      { "type": "text", "text": "%s", "size": "sm", "color": "#555555" },
+                      { "type": "text", "text": "🌤 %s", "size": "md", "wrap": true },
+                      { "type": "text", "text": "🌡 %s°C / 💧%s%%", "size": "sm" }
+                    ] } }
+                """.formatted(city, town,
+                        target.format(dtf), safe(wx), safe(temp), safe(pop));
+                bubbles.add(bubble);
+            }
+
+            return "{ \"type\": \"carousel\", \"contents\": ["+String.join(",", bubbles)+"] }";
+        } catch (Exception e) {
+            logger.error("Daily 預報錯誤", e);
+            return textBubble("❌ 查詢失敗：" + e.getMessage());
         }
     }
 

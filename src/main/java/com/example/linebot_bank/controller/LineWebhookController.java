@@ -135,32 +135,23 @@ public class LineWebhookController {
 
                         // ✅ 天氣查詢
                         if (text.startsWith("天氣")) {
-                            // 先把連續空白壓成一格，避免多個空白導致切錯
                             String[] parts = text.trim().replaceAll("\\s+", " ").split(" ");
 
                             if (parts.length < 3) {
                                 replyTextWithMenu(replyToken,
-                                    "⚠️ 查詢失敗，請輸入格式：天氣 縣市 鄉鎮（可選：今天/明天/HH:mm/YYYY-MM-DD/\"明天 10:00\"/\"2025-09-18 14:00\"）\n例如：天氣 臺北市 文山區 14:00");
+                                    "⚠️ 查詢失敗，請輸入格式：天氣 縣市 鄉鎮（可選：今天/明天/HH:mm/YYYY-MM-DD/明天 10:00）\n例如：天氣 臺北市 文山區 14:00");
                                 continue;
                             }
 
-                            // 正規化：台 -> 臺
                             String city = parts[1].replace("台", "臺");
                             String town = parts[2].replace("台", "臺");
-
-                            // 把第 4 個 token 之後全部合併起來，作為 whenToken
                             String whenToken = null;
                             if (parts.length > 3) {
                                 whenToken = String.join(" ", Arrays.copyOfRange(parts, 3, parts.length));
-                                // 也順手把「台」->「臺」
                                 whenToken = whenToken.replace("台", "臺");
                             }
 
-                            // 方便在主控台確認
-                            System.out.println(">>> WEATHER QUERY city=" + city + ", town=" + town + ", whenToken=" + whenToken);
-
                             try {
-                                // ✅ 一律呼叫三參數版本（把時間交給 service 判斷）
                                 String bubble = weatherService.buildWeatherFlexMessage(city, town, whenToken);
                                 replyFlex(replyToken, "天氣資訊", bubble);
                             } catch (Exception ex) {
@@ -169,8 +160,24 @@ public class LineWebhookController {
                             continue;
                         }
 
-
-    
+                        // ✅ 48 小時天氣查詢
+                        if (text.startsWith("48小時")) {
+                            String[] parts = text.trim().replaceAll("\\s+", " ").split(" ");
+                            if (parts.length < 3) {
+                                replyTextWithMenu(replyToken,
+                                    "⚠️ 查詢失敗，請輸入格式：48小時 縣市 鄉鎮\n例如：48小時 臺北市 文山區");
+                                continue;
+                            }
+                            String city = parts[1].replace("台", "臺");
+                            String town = parts[2].replace("台", "臺");
+                            try {
+                                String carousel = weatherService.build48hWeatherFlex(city, town);
+                                replyFlex(replyToken, "48小時天氣預報", carousel);
+                            } catch (Exception ex) {
+                                replyError(replyToken, "查詢失敗：" + ex.getMessage());
+                            }
+                            continue;
+                        }
 
                         // ✅ 選單快捷
                         if (isMenuKeyword(text)) { replyMenuQuick(replyToken); continue; }
@@ -210,7 +217,7 @@ public class LineWebhookController {
                             continue;
                         }
 
-                        // ✅ 存款（文字輸入格式：存 1000）
+                        // ✅ 存款
                         if (text.matches("^存\\s+\\d+(\\.\\d{1,2})?$")) {
                             try {
                                 String num = text.split("\\s+")[1];
@@ -224,7 +231,7 @@ public class LineWebhookController {
                             continue;
                         }
 
-                        // ✅ 提款（文字輸入格式：提 500）
+                        // ✅ 提款
                         if (text.matches("^提\\s+\\d+(\\.\\d{1,2})?$")) {
                             try {
                                 String num = text.split("\\s+")[1];

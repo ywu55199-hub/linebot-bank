@@ -10,5 +10,5 @@ public class LinebotBankApplication {
 		SpringApplication.run(LinebotBankApplication.class, args);
 	}
 
-}
+}	
 
